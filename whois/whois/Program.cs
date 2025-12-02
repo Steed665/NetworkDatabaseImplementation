@@ -9,176 +9,213 @@ namespace whois
 {
     class Program
     {
-        // Set to false if you don't want console debug noise
         static bool debug = true;
 
-        // TODO: Change this to your real connection string
-        static string connectionString =
+        static string connStr =
             "Server=localhost;Database=AssignmentDatabase;Trusted_Connection=True;TrustServerCertificate=True;";
 
         static void Main(string[] args)
         {
-            // If no arguments: run as network server on port 443
             if (args.Length == 0)
             {
-                Console.WriteLine("Starting Server on port 443");
+                Console.WriteLine("Starting server on 443");
                 RunServer();
             }
             else
             {
-                // Process each argument as a whois command
                 foreach (var arg in args)
                 {
                     if (debug) Console.WriteLine(arg);
-                    ProcessCommand(arg);
+                    HandleCommand(arg);
                 }
             }
         }
 
-        // ---------------------- DB helpers ----------------------
+        // DB helpers
 
-        static string? GetUserIdForLogin(string loginId)
+        static string? GetUserId(string login)
         {
-            using var conn = new SqlConnection(connectionString);
-            conn.Open();
-            using var cmd = new SqlCommand(
-                "SELECT TOP 1 UserID FROM UserLogin WHERE LoginID=@login", conn);
-            cmd.Parameters.AddWithValue("@login", loginId);
-            var obj = cmd.ExecuteScalar();
-            return obj as string;
+            try
+            {
+                using var conn = new SqlConnection(connStr);
+                conn.Open();
+
+                using var cmd = new SqlCommand(
+                    "SELECT TOP 1 UserID FROM UserLogin WHERE LoginID=@login", conn);
+                cmd.Parameters.AddWithValue("@login", login);
+                return cmd.ExecuteScalar() as string;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"DB error in GetUserId: {ex.Message} (check connection and LoginAccount/UserLogin)");
+                return null;
+            }
         }
 
-        static string GetOrCreateUserIdForLogin(string loginId)
+        // Get existing user or create new one
+        static string EnsureUser(string login)
         {
-            // Try existing first
-            var existing = GetUserIdForLogin(loginId);
+            var existing = GetUserId(login);
             if (!string.IsNullOrEmpty(existing)) return existing;
 
-            using var conn = new SqlConnection(connectionString);
-            conn.Open();
-
-            // Ensure LoginAccount exists
-            using (var cmdCheck = new SqlCommand(
-                "SELECT COUNT(*) FROM LoginAccount WHERE LoginID=@login", conn))
+            try
             {
-                cmdCheck.Parameters.AddWithValue("@login", loginId);
-                var count = (int)cmdCheck.ExecuteScalar();
-                if (count == 0)
+                using var conn = new SqlConnection(connStr);
+                conn.Open();
+
+                using (var cmdCheck = new SqlCommand(
+                    "SELECT COUNT(*) FROM LoginAccount WHERE LoginID=@l", conn))
                 {
-                    using var cmdIns = new SqlCommand(
-                        "INSERT INTO LoginAccount(LoginID) VALUES(@login)", conn);
-                    cmdIns.Parameters.AddWithValue("@login", loginId);
-                    cmdIns.ExecuteNonQuery();
+                    cmdCheck.Parameters.AddWithValue("@l", login);
+                    var count = (int)cmdCheck.ExecuteScalar();
+                    if (count == 0)
+                    {
+                        using var cmdIns = new SqlCommand(
+                            "INSERT INTO LoginAccount(LoginID) VALUES(@l)", conn);
+                        cmdIns.Parameters.AddWithValue("@l", login);
+                        cmdIns.ExecuteNonQuery();
+                    }
                 }
+
+                string userId = Guid.NewGuid().ToString();
+
+                using (var cmdUser = new SqlCommand(
+                    "INSERT INTO CompUser(UserID,Surname,Title,LocationID) VALUES(@u,NULL,NULL,NULL)", conn))
+                {
+                    cmdUser.Parameters.AddWithValue("@u", userId);
+                    cmdUser.ExecuteNonQuery();
+                }
+
+                using (var cmdLink = new SqlCommand(
+                    "INSERT INTO UserLogin(UserID,LoginID) VALUES(@u,@l)", conn))
+                {
+                    cmdLink.Parameters.AddWithValue("@u", userId);
+                    cmdLink.Parameters.AddWithValue("@l", login);
+                    cmdLink.ExecuteNonQuery();
+                }
+
+                return userId;
             }
-
-            // Create a new user
-            string userId = Guid.NewGuid().ToString();
-
-            using (var cmdUser = new SqlCommand(
-                "INSERT INTO CompUser(UserID,Surname,Title,LocationID) VALUES(@uid,NULL,NULL,NULL)", conn))
+            catch (Exception ex)
             {
-                cmdUser.Parameters.AddWithValue("@uid", userId);
-                cmdUser.ExecuteNonQuery();
+                Console.WriteLine($"DB error in EnsureUser: {ex.Message} (check CompUser and UserLogin tables)");
+                throw;
             }
+        }
 
-            // Link login → user
-            using (var cmdLink = new SqlCommand(
-                "INSERT INTO UserLogin(UserID,LoginID) VALUES(@uid,@login)", conn))
+        static string GetForenames(string userId)
+        {
+            try
             {
-                cmdLink.Parameters.AddWithValue("@uid", userId);
-                cmdLink.Parameters.AddWithValue("@login", loginId);
-                cmdLink.ExecuteNonQuery();
+                using var conn = new SqlConnection(connStr);
+                conn.Open();
+
+                using var cmd = new SqlCommand(
+                    "SELECT Forename FROM UserForename WHERE UserID=@u ORDER BY ForenameOrder", conn);
+                cmd.Parameters.AddWithValue("@u", userId);
+
+                using var r = cmd.ExecuteReader();
+                var list = new System.Collections.Generic.List<string>();
+                while (r.Read())
+                    list.Add(r["Forename"] as string ?? "");
+                return string.Join(" ", list);
             }
-
-            return userId;
+            catch (Exception ex)
+            {
+                Console.WriteLine($"DB error in GetForenames: {ex.Message} (check UserForename table)");
+                return "";
+            }
         }
 
-        static string GetForenamesFromDb(string userId)
+        static string GetPositions(string userId)
         {
-            using var conn = new SqlConnection(connectionString);
-            conn.Open();
-            using var cmd = new SqlCommand(
-                "SELECT Forename FROM UserForename WHERE UserID=@uid ORDER BY ForenameOrder", conn);
-            cmd.Parameters.AddWithValue("@uid", userId);
-            using var r = cmd.ExecuteReader();
-            var parts = new System.Collections.Generic.List<string>();
-            while (r.Read())
-                parts.Add(r["Forename"] as string ?? "");
-            return string.Join(" ", parts);
+            try
+            {
+                using var conn = new SqlConnection(connStr);
+                conn.Open();
+
+                using var cmd = new SqlCommand(
+                    @"SELECT p.PositionName
+                      FROM UserPosition up
+                      JOIN Position p ON up.PositionID=p.PositionID
+                      WHERE up.UserID=@u", conn);
+                cmd.Parameters.AddWithValue("@u", userId);
+
+                using var r = cmd.ExecuteReader();
+                var list = new System.Collections.Generic.List<string>();
+                while (r.Read())
+                    list.Add(r["PositionName"] as string ?? "");
+                return string.Join(", ", list);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"DB error in GetPositions: {ex.Message} (check Position and UserPosition)");
+                return "";
+            }
         }
 
-        static string GetPositionsFromDb(string userId)
+        static string GetList(string sql, string paramName, string paramVal)
         {
-            using var conn = new SqlConnection(connectionString);
-            conn.Open();
-            using var cmd = new SqlCommand(
-                @"SELECT p.PositionName
-                  FROM UserPosition up
-                  JOIN Position p ON up.PositionID=p.PositionID
-                  WHERE up.UserID=@uid", conn);
-            cmd.Parameters.AddWithValue("@uid", userId);
-            using var r = cmd.ExecuteReader();
-            var parts = new System.Collections.Generic.List<string>();
-            while (r.Read())
-                parts.Add(r["PositionName"] as string ?? "");
-            return string.Join(", ", parts);
-        }
+            try
+            {
+                using var conn = new SqlConnection(connStr);
+                conn.Open();
 
-        static string GetListFromDb(string sql, string paramName, string paramVal)
-        {
-            using var conn = new SqlConnection(connectionString);
-            conn.Open();
-            using var cmd = new SqlCommand(sql, conn);
-            cmd.Parameters.AddWithValue(paramName, paramVal);
-            using var r = cmd.ExecuteReader();
-            var parts = new System.Collections.Generic.List<string>();
-            while (r.Read())
-                parts.Add(r[0] as string ?? "");
-            return string.Join(", ", parts);
-        }
+                using var cmd = new SqlCommand(sql, conn);
+                cmd.Parameters.AddWithValue(paramName, paramVal);
 
-        static string? ScalarString(string sql, string paramName, string paramVal)
-        {
-            using var conn = new SqlConnection(connectionString);
-            conn.Open();
-            using var cmd = new SqlCommand(sql, conn);
-            cmd.Parameters.AddWithValue(paramName, paramVal);
-            var obj = cmd.ExecuteScalar();
-            return obj as string;
+                using var r = cmd.ExecuteReader();
+                var list = new System.Collections.Generic.List<string>();
+                while (r.Read())
+                    list.Add(r[0] as string ?? "");
+                return string.Join(", ", list);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"DB error in GetList: {ex.Message} (check related table and query)");
+                return "";
+            }
         }
 
         static int GetOrCreateId(string selectSql, string insertSql,
                                  string paramName, string paramVal)
         {
-            using var conn = new SqlConnection(connectionString);
-            conn.Open();
-
-            using (var cmdSel = new SqlCommand(selectSql, conn))
+            try
             {
-                cmdSel.Parameters.AddWithValue(paramName, paramVal);
-                var obj = cmdSel.ExecuteScalar();
-                if (obj != null && obj != DBNull.Value)
+                using var conn = new SqlConnection(connStr);
+                conn.Open();
+
+                using (var cmdSel = new SqlCommand(selectSql, conn))
+                {
+                    cmdSel.Parameters.AddWithValue(paramName, paramVal);
+                    var obj = cmdSel.ExecuteScalar();
+                    if (obj != null && obj != DBNull.Value)
+                        return Convert.ToInt32(obj);
+                }
+
+                using (var cmdIns = new SqlCommand(insertSql, conn))
+                {
+                    cmdIns.Parameters.AddWithValue(paramName, paramVal);
+                    var obj = cmdIns.ExecuteScalar();
                     return Convert.ToInt32(obj);
+                }
             }
-
-            using (var cmdIns = new SqlCommand(insertSql, conn))
+            catch (Exception ex)
             {
-                cmdIns.Parameters.AddWithValue(paramName, paramVal);
-                var obj = cmdIns.ExecuteScalar();
-                return Convert.ToInt32(obj);
+                Console.WriteLine($"DB error in GetOrCreateId: {ex.Message} (check Position or Location tables)");
+                throw;
             }
         }
 
-        // ---------------------- Core operations ----------------------
+        // whois operations
 
-        static void Dump(string loginId)
+        static void Dump(string login)
         {
-            if (debug) Console.WriteLine(" output all fields");
-            string? userId = GetUserIdForLogin(loginId);
+            if (debug) Console.WriteLine("Dump all fields");
+            string? userId = GetUserId(login);
             if (userId == null)
             {
-                Console.WriteLine($"User '{loginId}' not known");
+                Console.WriteLine($"User '{login}' not known");
                 return;
             }
 
@@ -186,15 +223,18 @@ namespace whois
             string? title = null;
             string? location = null;
 
-            using (var conn = new SqlConnection(connectionString))
+            try
             {
+                using var conn = new SqlConnection(connStr);
                 conn.Open();
+
                 using var cmd = new SqlCommand(
                     @"SELECT c.Surname,c.Title,l.LocationDescription
                       FROM CompUser c
                       LEFT JOIN Location l ON c.LocationID=l.LocationID
-                      WHERE c.UserID=@uid", conn);
-                cmd.Parameters.AddWithValue("@uid", userId);
+                      WHERE c.UserID=@u", conn);
+                cmd.Parameters.AddWithValue("@u", userId);
+
                 using var r = cmd.ExecuteReader();
                 if (r.Read())
                 {
@@ -203,13 +243,15 @@ namespace whois
                     location = r["LocationDescription"] as string;
                 }
             }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"DB error in Dump: {ex.Message} (check CompUser and Location)");
+            }
 
-            var forenames = GetForenamesFromDb(userId);
-            var positions = GetPositionsFromDb(userId);
-            var phones = GetListFromDb(
-                "SELECT PhoneNumber FROM UserPhone WHERE UserID=@uid", "@uid", userId);
-            var emails = GetListFromDb(
-                "SELECT EmailAddress FROM UserEmail WHERE UserID=@uid", "@uid", userId);
+            string forenames = GetForenames(userId);
+            string positions = GetPositions(userId);
+            string phones = GetList("SELECT PhoneNumber FROM UserPhone WHERE UserID=@u", "@u", userId);
+            string emails = GetList("SELECT EmailAddress FROM UserEmail WHERE UserID=@u", "@u", userId);
 
             Console.WriteLine($"UserID={userId}");
             Console.WriteLine($"Surname={surname ?? ""}");
@@ -221,379 +263,409 @@ namespace whois
             Console.WriteLine($"location={location ?? ""}");
         }
 
-        static string? GetField(string loginId, string field)
+        static string? GetField(string login, string field)
         {
-            string? userId = GetUserIdForLogin(loginId);
+            string? userId = GetUserId(login);
             if (userId == null) return null;
 
-            switch (field)
+            try
             {
-                case "UserID":
-                    return userId;
-                case "Surname":
-                    return ScalarString("SELECT Surname FROM CompUser WHERE UserID=@uid", "@uid", userId);
-                case "Fornames":
-                    return GetForenamesFromDb(userId);
-                case "Title":
-                    return ScalarString("SELECT Title FROM CompUser WHERE UserID=@uid", "@uid", userId);
-                case "Position":
-                    return GetPositionsFromDb(userId);
-                case "Phone":
-                    return GetListFromDb("SELECT PhoneNumber FROM UserPhone WHERE UserID=@uid", "@uid", userId);
-                case "Email":
-                    return GetListFromDb("SELECT EmailAddress FROM UserEmail WHERE UserID=@uid", "@uid", userId);
-                case "location":
-                    return ScalarString(
-                        @"SELECT l.LocationDescription
-                          FROM CompUser c LEFT JOIN Location l ON c.LocationID=l.LocationID
-                          WHERE c.UserID=@uid", "@uid", userId);
-                default:
-                    return null;
+                switch (field)
+                {
+                    case "UserID":
+                        return userId;
+
+                    case "Surname":
+                        using (var conn = new SqlConnection(connStr))
+                        {
+                            conn.Open();
+                            using var cmd = new SqlCommand(
+                                "SELECT Surname FROM CompUser WHERE UserID=@u", conn);
+                            cmd.Parameters.AddWithValue("@u", userId);
+                            return cmd.ExecuteScalar() as string;
+                        }
+
+                    case "Fornames":
+                        return GetForenames(userId);
+
+                    case "Title":
+                        using (var conn = new SqlConnection(connStr))
+                        {
+                            conn.Open();
+                            using var cmd = new SqlCommand(
+                                "SELECT Title FROM CompUser WHERE UserID=@u", conn);
+                            cmd.Parameters.AddWithValue("@u", userId);
+                            return cmd.ExecuteScalar() as string;
+                        }
+
+                    case "Position":
+                        return GetPositions(userId);
+
+                    case "Phone":
+                        return GetList("SELECT PhoneNumber FROM UserPhone WHERE UserID=@u", "@u", userId);
+
+                    case "Email":
+                        return GetList("SELECT EmailAddress FROM UserEmail WHERE UserID=@u", "@u", userId);
+
+                    case "location":
+                        using (var conn = new SqlConnection(connStr))
+                        {
+                            conn.Open();
+                            using var cmd = new SqlCommand(
+                                @"SELECT l.LocationDescription
+                                  FROM CompUser c
+                                  LEFT JOIN Location l ON c.LocationID=l.LocationID
+                                  WHERE c.UserID=@u", conn);
+                            cmd.Parameters.AddWithValue("@u", userId);
+                            return cmd.ExecuteScalar() as string;
+                        }
+
+                    default:
+                        return null;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"DB error in GetField: {ex.Message} (check field and tables)");
+                return null;
             }
         }
 
-        static void Lookup(string loginId, string field)
+        static void Lookup(string login, string field)
         {
-            if (debug) Console.WriteLine($" lookup field '{field}'");
-            var result = GetField(loginId, field);
-            if (result == null)
+            if (debug) Console.WriteLine($"Lookup field '{field}'");
+            var value = GetField(login, field);
+            if (value == null)
             {
-                Console.WriteLine($"User '{loginId}' not known");
+                Console.WriteLine($"User '{login}' not known");
                 return;
             }
-            Console.WriteLine(result);
+            Console.WriteLine(value);
         }
 
-        static void Update(string loginId, string field, string update)
+        static void Update(string login, string field, string value)
         {
-            if (debug) Console.WriteLine($" update field '{field}' to '{update}'");
+            if (debug) Console.WriteLine($"Update field '{field}' to '{value}'");
 
-            string userId = GetOrCreateUserIdForLogin(loginId);
+            string userId = EnsureUser(login);
 
-            switch (field)
+            try
             {
-                case "Surname":
-                case "Title":
-                    using (var conn = new SqlConnection(connectionString))
-                    {
-                        conn.Open();
-                        using var cmd = new SqlCommand(
-                            $"UPDATE CompUser SET {field}=@v WHERE UserID=@uid", conn);
-                        cmd.Parameters.AddWithValue("@v", (object)update ?? DBNull.Value);
-                        cmd.Parameters.AddWithValue("@uid", userId);
-                        cmd.ExecuteNonQuery();
-                    }
-                    break;
-
-                case "Fornames":
-                    using (var conn = new SqlConnection(connectionString))
-                    {
-                        conn.Open();
-                        using (var del = new SqlCommand(
-                            "DELETE FROM UserForename WHERE UserID=@uid", conn))
-                        {
-                            del.Parameters.AddWithValue("@uid", userId);
-                            del.ExecuteNonQuery();
-                        }
-
-                        var parts = (update ?? "")
-                            .Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                        int order = 1;
-                        foreach (var fn in parts)
-                        {
-                            using var ins = new SqlCommand(
-                                "INSERT INTO UserForename(UserID,ForenameOrder,Forename) VALUES(@uid,@ord,@fn)", conn);
-                            ins.Parameters.AddWithValue("@uid", userId);
-                            ins.Parameters.AddWithValue("@ord", order++);
-                            ins.Parameters.AddWithValue("@fn", fn);
-                            ins.ExecuteNonQuery();
-                        }
-                    }
-                    break;
-
-                case "Position":
-                    {
-                        int posId = GetOrCreateId(
-                            "SELECT PositionID FROM Position WHERE PositionName=@name",
-                            "INSERT INTO Position(PositionName) VALUES(@name);SELECT SCOPE_IDENTITY();",
-                            "@name", update);
-
-                        using var conn = new SqlConnection(connectionString);
-                        conn.Open();
-                        using (var del = new SqlCommand(
-                            "DELETE FROM UserPosition WHERE UserID=@uid", conn))
-                        {
-                            del.Parameters.AddWithValue("@uid", userId);
-                            del.ExecuteNonQuery();
-                        }
-                        using var ins = new SqlCommand(
-                            "INSERT INTO UserPosition(UserID,PositionID) VALUES(@uid,@pid)", conn);
-                        ins.Parameters.AddWithValue("@uid", userId);
-                        ins.Parameters.AddWithValue("@pid", posId);
-                        ins.ExecuteNonQuery();
-                    }
-                    break;
-
-                case "Phone":
-                    using (var conn = new SqlConnection(connectionString))
-                    {
-                        conn.Open();
-                        using (var del = new SqlCommand(
-                            "DELETE FROM UserPhone WHERE UserID=@uid", conn))
-                        {
-                            del.Parameters.AddWithValue("@uid", userId);
-                            del.ExecuteNonQuery();
-                        }
-                        if (!string.IsNullOrEmpty(update))
-                        {
-                            using (var insPhone = new SqlCommand(
-                                "IF NOT EXISTS(SELECT 1 FROM Phone WHERE PhoneNumber=@p) " +
-                                "INSERT INTO Phone(PhoneNumber) VALUES(@p)", conn))
-                            {
-                                insPhone.Parameters.AddWithValue("@p", update);
-                                insPhone.ExecuteNonQuery();
-                            }
-                            using var ins = new SqlCommand(
-                                "INSERT INTO UserPhone(UserID,PhoneNumber) VALUES(@uid,@p)", conn);
-                            ins.Parameters.AddWithValue("@uid", userId);
-                            ins.Parameters.AddWithValue("@p", update);
-                            ins.ExecuteNonQuery();
-                        }
-                    }
-                    break;
-
-                case "Email":
-                    using (var conn = new SqlConnection(connectionString))
-                    {
-                        conn.Open();
-                        using (var del = new SqlCommand(
-                            "DELETE FROM UserEmail WHERE UserID=@uid", conn))
-                        {
-                            del.Parameters.AddWithValue("@uid", userId);
-                            del.ExecuteNonQuery();
-                        }
-                        if (!string.IsNullOrEmpty(update))
-                        {
-                            using (var insEmail = new SqlCommand(
-                                "IF NOT EXISTS(SELECT 1 FROM Email WHERE EmailAddress=@e) " +
-                                "INSERT INTO Email(EmailAddress) VALUES(@e)", conn))
-                            {
-                                insEmail.Parameters.AddWithValue("@e", update);
-                                insEmail.ExecuteNonQuery();
-                            }
-                            using var ins = new SqlCommand(
-                                "INSERT INTO UserEmail(UserID,EmailAddress) VALUES(@uid,@e)", conn);
-                            ins.Parameters.AddWithValue("@uid", userId);
-                            ins.Parameters.AddWithValue("@e", update);
-                            ins.ExecuteNonQuery();
-                        }
-                    }
-                    break;
-
-                case "location":
-                    {
-                        int locId = GetOrCreateId(
-                            "SELECT LocationID FROM Location WHERE LocationDescription=@name",
-                            "INSERT INTO Location(LocationID,LocationDescription) " +
-                            "VALUES((SELECT ISNULL(MAX(LocationID),0)+1 FROM Location),@name); " +
-                            "SELECT MAX(LocationID) FROM Location;",
-                            "@name", update);
-
-                        using var conn = new SqlConnection(connectionString);
-                        conn.Open();
-                        using var cmd = new SqlCommand(
-                            "UPDATE CompUser SET LocationID=@loc WHERE UserID=@uid", conn);
-                        cmd.Parameters.AddWithValue("@loc", locId);
-                        cmd.Parameters.AddWithValue("@uid", userId);
-                        cmd.ExecuteNonQuery();
-                    }
-                    break;
-            }
-
-            Console.WriteLine("OK");
-        }
-
-        static void Delete(string loginId)
-        {
-            if (debug) Console.WriteLine($"Delete record '{loginId}'");
-            string? userId = GetUserIdForLogin(loginId);
-            using var conn = new SqlConnection(connectionString);
-            conn.Open();
-
-            if (userId != null)
-            {
-                void Del(string sql, string paramName, string val)
+                switch (field)
                 {
-                    using var cmd = new SqlCommand(sql, conn);
-                    cmd.Parameters.AddWithValue(paramName, val);
+                    case "Surname":
+                    case "Title":
+                        using (var conn = new SqlConnection(connStr))
+                        {
+                            conn.Open();
+                            using var cmd = new SqlCommand(
+                                $"UPDATE CompUser SET {field}=@v WHERE UserID=@u", conn);
+                            cmd.Parameters.AddWithValue("@v", (object)value ?? DBNull.Value);
+                            cmd.Parameters.AddWithValue("@u", userId);
+                            cmd.ExecuteNonQuery();
+                        }
+                        break;
+
+                    case "Fornames":
+                        using (var conn = new SqlConnection(connStr))
+                        {
+                            conn.Open();
+                            using (var del = new SqlCommand(
+                                "DELETE FROM UserForename WHERE UserID=@u", conn))
+                            {
+                                del.Parameters.AddWithValue("@u", userId);
+                                del.ExecuteNonQuery();
+                            }
+
+                            var parts = (value ?? "")
+                                .Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                            int ord = 1;
+                            foreach (var fn in parts)
+                            {
+                                using var ins = new SqlCommand(
+                                    "INSERT INTO UserForename(UserID,ForenameOrder,Forename) VALUES(@u,@o,@f)", conn);
+                                ins.Parameters.AddWithValue("@u", userId);
+                                ins.Parameters.AddWithValue("@o", ord++);
+                                ins.Parameters.AddWithValue("@f", fn);
+                                ins.ExecuteNonQuery();
+                            }
+                        }
+                        break;
+
+                    case "Position":
+                        {
+                            int posId = GetOrCreateId(
+                                "SELECT PositionID FROM Position WHERE PositionName=@n",
+                                "INSERT INTO Position(PositionName) VALUES(@n);SELECT SCOPE_IDENTITY();",
+                                "@n", value);
+
+                            using var conn = new SqlConnection(connStr);
+                            conn.Open();
+                            using (var del = new SqlCommand(
+                                "DELETE FROM UserPosition WHERE UserID=@u", conn))
+                            {
+                                del.Parameters.AddWithValue("@u", userId);
+                                del.ExecuteNonQuery();
+                            }
+                            using var ins = new SqlCommand(
+                                "INSERT INTO UserPosition(UserID,PositionID) VALUES(@u,@p)", conn);
+                            ins.Parameters.AddWithValue("@u", userId);
+                            ins.Parameters.AddWithValue("@p", posId);
+                            ins.ExecuteNonQuery();
+                        }
+                        break;
+
+                    case "Phone":
+                        using (var conn = new SqlConnection(connStr))
+                        {
+                            conn.Open();
+                            using (var del = new SqlCommand(
+                                "DELETE FROM UserPhone WHERE UserID=@u", conn))
+                            {
+                                del.Parameters.AddWithValue("@u", userId);
+                                del.ExecuteNonQuery();
+                            }
+                            if (!string.IsNullOrEmpty(value))
+                            {
+                                using (var insPhone = new SqlCommand(
+                                    "IF NOT EXISTS(SELECT 1 FROM Phone WHERE PhoneNumber=@p) " +
+                                    "INSERT INTO Phone(PhoneNumber) VALUES(@p)", conn))
+                                {
+                                    insPhone.Parameters.AddWithValue("@p", value);
+                                    insPhone.ExecuteNonQuery();
+                                }
+                                using var ins = new SqlCommand(
+                                    "INSERT INTO UserPhone(UserID,PhoneNumber) VALUES(@u,@p)", conn);
+                                ins.Parameters.AddWithValue("@u", userId);
+                                ins.Parameters.AddWithValue("@p", value);
+                                ins.ExecuteNonQuery();
+                            }
+                        }
+                        break;
+
+                    case "Email":
+                        using (var conn = new SqlConnection(connStr))
+                        {
+                            conn.Open();
+                            using (var del = new SqlCommand(
+                                "DELETE FROM UserEmail WHERE UserID=@u", conn))
+                            {
+                                del.Parameters.AddWithValue("@u", userId);
+                                del.ExecuteNonQuery();
+                            }
+                            if (!string.IsNullOrEmpty(value))
+                            {
+                                using (var insEmail = new SqlCommand(
+                                    "IF NOT EXISTS(SELECT 1 FROM Email WHERE EmailAddress=@e) " +
+                                    "INSERT INTO Email(EmailAddress) VALUES(@e)", conn))
+                                {
+                                    insEmail.Parameters.AddWithValue("@e", value);
+                                    insEmail.ExecuteNonQuery();
+                                }
+                                using var ins = new SqlCommand(
+                                    "INSERT INTO UserEmail(UserID,EmailAddress) VALUES(@u,@e)", conn);
+                                ins.Parameters.AddWithValue("@u", userId);
+                                ins.Parameters.AddWithValue("@e", value);
+                                ins.ExecuteNonQuery();
+                            }
+                        }
+                        break;
+
+                    case "location":
+                        {
+                            int locId = GetOrCreateId(
+                                "SELECT LocationID FROM Location WHERE LocationDescription=@n",
+                                "INSERT INTO Location(LocationID,LocationDescription) " +
+                                "VALUES((SELECT ISNULL(MAX(LocationID),0)+1 FROM Location),@n); " +
+                                "SELECT MAX(LocationID) FROM Location;",
+                                "@n", value);
+
+                            using var conn = new SqlConnection(connStr);
+                            conn.Open();
+                            using var cmd = new SqlCommand(
+                                "UPDATE CompUser SET LocationID=@loc WHERE UserID=@u", conn);
+                            cmd.Parameters.AddWithValue("@loc", locId);
+                            cmd.Parameters.AddWithValue("@u", userId);
+                            cmd.ExecuteNonQuery();
+                        }
+                        break;
+                }
+
+                Console.WriteLine("OK");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"DB error in Update: {ex.Message} (check field name and related tables)");
+            }
+        }
+
+        static void DeleteUser(string login)
+        {
+            if (debug) Console.WriteLine($"Delete '{login}'");
+            string? userId = GetUserId(login);
+
+            try
+            {
+                using var conn = new SqlConnection(connStr);
+                conn.Open();
+
+                if (userId != null)
+                {
+                    void Del(string sql)
+                    {
+                        using var cmd = new SqlCommand(sql, conn);
+                        cmd.Parameters.AddWithValue("@u", userId);
+                        cmd.ExecuteNonQuery();
+                    }
+
+                    Del("DELETE FROM UserEmail WHERE UserID=@u");
+                    Del("DELETE FROM UserPhone WHERE UserID=@u");
+                    Del("DELETE FROM UserPosition WHERE UserID=@u");
+                    Del("DELETE FROM UserForename WHERE UserID=@u");
+                    Del("DELETE FROM UserLogin WHERE UserID=@u");
+                    Del("DELETE FROM CompUser WHERE UserID=@u");
+                }
+
+                using (var cmd = new SqlCommand(
+                    "DELETE FROM LoginAccount WHERE LoginID=@l", conn))
+                {
+                    cmd.Parameters.AddWithValue("@l", login);
                     cmd.ExecuteNonQuery();
                 }
 
-                Del("DELETE FROM UserEmail WHERE UserID=@u", "@u", userId);
-                Del("DELETE FROM UserPhone WHERE UserID=@u", "@u", userId);
-                Del("DELETE FROM UserPosition WHERE UserID=@u", "@u", userId);
-                Del("DELETE FROM UserForename WHERE UserID=@u", "@u", userId);
-                Del("DELETE FROM UserLogin WHERE UserID=@u", "@u", userId);
-                Del("DELETE FROM CompUser WHERE UserID=@u", "@u", userId);
+                Console.WriteLine("OK");
             }
-
-            using (var cmd = new SqlCommand(
-                "DELETE FROM LoginAccount WHERE LoginID=@login", conn))
+            catch (Exception ex)
             {
-                cmd.Parameters.AddWithValue("@login", loginId);
-                cmd.ExecuteNonQuery();
+                Console.WriteLine($"DB error in DeleteUser: {ex.Message} (check foreign keys and tables)");
             }
-
-            Console.WriteLine("OK");
         }
 
-        // ---------------------- whois command processing ----------------------
+        // whois command parsing
 
-        static void ProcessCommand(string command)
+        static void HandleCommand(string cmd)
         {
-            if (debug) Console.WriteLine($"\nCommand: {command}");
+            if (debug) Console.WriteLine($"\nCommand: {cmd}");
             try
             {
-                string[] slice = command.Split(new char[] { '?' }, 2);
-                string ID = slice[0];
-                string? operation = null;
-                string? update = null;
+                string[] parts = cmd.Split(new char[] { '?' }, 2);
+                string login = parts[0];
+                string? op = null;
                 string? field = null;
+                string? value = null;
 
-                if (slice.Length == 2)
+                if (parts.Length == 2)
                 {
-                    operation = slice[1];
-                    if (operation == "")
+                    op = parts[1];
+                    if (op == "")
                     {
-                        Delete(ID);
+                        DeleteUser(login);
                         return;
                     }
-                    string[] pieces = operation.Split(new char[] { '=' }, 2);
-                    field = pieces[0];
-                    if (pieces.Length == 2) update = pieces[1];
+
+                    string[] p2 = op.Split(new char[] { '=' }, 2);
+                    field = p2[0];
+                    if (p2.Length == 2) value = p2[1];
                 }
 
-                if (debug) Console.Write($"Operation on ID '{ID}'");
-
-                if (operation == null && update == null)
+                if (op == null && value == null)
                 {
-                    Dump(ID);
+                    Dump(login);
                 }
-                else if (operation != null && update == null)
+                else if (op != null && value == null)
                 {
-                    Lookup(ID, field!);
+                    Lookup(login, field!);
                 }
-                else if (operation != null && update != null)
+                else if (op != null && value != null)
                 {
-                    Update(ID, field!, update);
+                    Update(login, field!, value);
                 }
             }
-            catch (Exception e)
+            catch (Exception ex)
             {
-                Console.WriteLine($"Fault in Command Processing: {e}");
+                Console.WriteLine($"Error in HandleCommand: {ex.Message} (check command format like cssbct or cssbct?field=value)");
             }
         }
 
-        // ---------------------- HTTP wrappers for location ----------------------
+        // HTTP wrappers for location
 
-        static string? GetLocationForLogin(string loginId)
+        static string? GetLocation(string login) => GetField(login, "location");
+
+        static void SetLocation(string login, string loc) => Update(login, "location", loc);
+
+        // HTTP request handling
+
+        static void HandleHttp(NetworkStream stream)
         {
-            return GetField(loginId, "location");
-        }
-
-        static void SetLocationForLogin(string loginId, string location)
-        {
-            Update(loginId, "location", location);
-        }
-
-        // ---------------------- HTTP request handling ----------------------
-
-        static void doRequest(NetworkStream socketStream)
-        {
-            using var sw = new StreamWriter(socketStream) { AutoFlush = true };
-            using var sr = new StreamReader(socketStream);
-
-            if (debug) Console.WriteLine("Waiting for input from client...");
+            using var sw = new StreamWriter(stream) { AutoFlush = true };
+            using var sr = new StreamReader(stream);
 
             try
             {
                 string? line = sr.ReadLine();
                 if (line == null)
                 {
-                    if (debug) Console.WriteLine("Ignoring null command");
+                    if (debug) Console.WriteLine("Empty HTTP request");
                     return;
                 }
 
-                Console.WriteLine($"Received Network Command: '{line}'");
+                if (debug) Console.WriteLine($"HTTP: {line}");
 
-                // POST / HTTP/1.1  (update location)
+                // POST / HTTP/1.1 update
                 if (line == "POST / HTTP/1.1")
                 {
-                    if (debug) Console.WriteLine("Received an update (POST) request");
+                    int len = 0;
 
-                    int contentLength = 0;
-
-                    // Read headers until blank line
                     while (!string.IsNullOrEmpty(line = sr.ReadLine()))
                     {
-                        if (debug) Console.WriteLine($"Header: '{line}'");
                         if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
                         {
-                            string lenStr = line.Substring("Content-Length:".Length).Trim();
-                            int.TryParse(lenStr, out contentLength);
+                            string s = line.Substring("Content-Length:".Length).Trim();
+                            int.TryParse(s, out len);
                         }
                     }
 
-                    // Read body
-                    char[] buf = new char[contentLength];
+                    char[] buf = new char[len];
                     int read = 0;
-                    while (read < contentLength)
+                    while (read < len)
                     {
-                        int r = sr.Read(buf, read, contentLength - read);
+                        int r = sr.Read(buf, read, len - read);
                         if (r <= 0) break;
                         read += r;
                     }
 
                     string body = new string(buf, 0, read);
-                    if (debug) Console.WriteLine($"Body: '{body}'");
+                    if (debug) Console.WriteLine($"Body: {body}");
 
-                    // Expect: name=<name>&location=<location>
-                    var parts = body.Split('&');
                     string? name = null;
-                    string? location = null;
-
-                    foreach (var p in parts)
+                    string? loc = null;
+                    foreach (var part in body.Split('&'))
                     {
-                        if (p.StartsWith("name="))
-                            name = p.Substring("name=".Length);
-                        else if (p.StartsWith("location="))
-                            location = p.Substring("location=".Length);
+                        if (part.StartsWith("name=")) name = part.Substring(5);
+                        else if (part.StartsWith("location=")) loc = part.Substring(9);
                     }
 
-                    if (string.IsNullOrEmpty(name) || location == null)
+                    if (string.IsNullOrEmpty(name) || loc == null)
                     {
                         sw.WriteLine("HTTP/1.1 400 Bad Request");
                         sw.WriteLine("Content-Type: text/plain");
                         sw.WriteLine();
-                        if (debug) Console.WriteLine("Bad POST body");
+                        if (debug) Console.WriteLine("POST body incorrect, expected name and location");
                         return;
                     }
 
-                    if (debug) Console.WriteLine($"Update location for '{name}' to '{location}'");
-                    SetLocationForLogin(name, location);
+                    SetLocation(name, loc);
 
                     sw.WriteLine("HTTP/1.1 200 OK");
                     sw.WriteLine("Content-Type: text/plain");
                     sw.WriteLine();
-                    Console.WriteLine($"Updated location for '{name}' to '{location}'");
+                    if (debug) Console.WriteLine($"Location updated: {name} -> {loc}");
                 }
-                // GET /?name=... HTTP/1.1  (lookup)
+                // GET /?name=... HTTP/1.1 lookup
                 else if (line.StartsWith("GET /?name=") && line.EndsWith(" HTTP/1.1"))
                 {
-                    if (debug) Console.WriteLine("Received a lookup (GET) request");
-
-                    string[] parts = line.Split(' ');
-                    if (parts.Length < 2)
+                    string[] first = line.Split(' ');
+                    if (first.Length < 2)
                     {
                         sw.WriteLine("HTTP/1.1 400 Bad Request");
                         sw.WriteLine("Content-Type: text/plain");
@@ -601,48 +673,43 @@ namespace whois
                         return;
                     }
 
-                    string path = parts[1]; // /?name=cssbct
+                    string path = first[1];
                     string name = path.Substring("/?name=".Length);
 
-                    // skip remaining headers
-                    while (!string.IsNullOrEmpty(line = sr.ReadLine()))
-                    {
-                        if (debug) Console.WriteLine($"Header: '{line}'");
-                    }
+                    while (!string.IsNullOrEmpty(line = sr.ReadLine())) { }
 
-                    string? location = GetLocationForLogin(name);
-
-                    if (location != null)
+                    string? loc = GetLocation(name);
+                    if (loc != null)
                     {
                         sw.WriteLine("HTTP/1.1 200 OK");
                         sw.WriteLine("Content-Type: text/plain");
                         sw.WriteLine();
-                        sw.WriteLine(location);
-                        Console.WriteLine($"Lookup '{name}' -> '{location}'");
+                        sw.WriteLine(loc);
+                        if (debug) Console.WriteLine($"Lookup {name} -> {loc}");
                     }
                     else
                     {
                         sw.WriteLine("HTTP/1.1 404 Not Found");
                         sw.WriteLine("Content-Type: text/plain");
                         sw.WriteLine();
-                        Console.WriteLine($"Lookup '{name}' -> NOT FOUND");
+                        if (debug) Console.WriteLine($"Lookup {name} not found");
                     }
                 }
                 else
                 {
-                    if (debug) Console.WriteLine("Unrecognised HTTP request line");
                     sw.WriteLine("HTTP/1.1 400 Bad Request");
                     sw.WriteLine("Content-Type: text/plain");
                     sw.WriteLine();
+                    if (debug) Console.WriteLine("Unknown HTTP request line");
                 }
             }
-            catch (Exception e)
+            catch (Exception ex)
             {
-                Console.WriteLine($"Fault in Network Command Processing: {e}");
+                Console.WriteLine($"Error in HandleHttp: {ex.Message} (check HTTP format or timeout)");
             }
         }
 
-        // ---------------------- Server loop ----------------------
+        // TCP server
 
         static void RunServer()
         {
@@ -650,30 +717,29 @@ namespace whois
             {
                 var listener = new TcpListener(IPAddress.Any, 443);
                 listener.Start();
-                if (debug) Console.WriteLine("Server listening on port 443...");
+                if (debug) Console.WriteLine("Listening on port 443");
 
                 while (true)
                 {
-                    var connection = listener.AcceptSocket();
-                    if (debug) Console.WriteLine("Accepted connection");
+                    var socket = listener.AcceptSocket();
+                    if (debug) Console.WriteLine("Connected");
 
                     Task.Run(() =>
                     {
-                        using (connection)
-                        using (var socketStream = new NetworkStream(connection))
+                        using (socket)
+                        using (var stream = new NetworkStream(socket))
                         {
-                            connection.ReceiveTimeout = 1000;
-                            connection.SendTimeout = 1000;
-                            doRequest(socketStream);
+                            socket.ReceiveTimeout = 1000;
+                            socket.SendTimeout = 1000;
+                            HandleHttp(stream);
                         }
                     });
                 }
             }
-            catch (Exception e)
+            catch (Exception ex)
             {
-                Console.WriteLine(e.ToString());
+                Console.WriteLine($"Server error in RunServer: {ex.Message} (port 443 errors)");
             }
-            if (debug) Console.WriteLine("Terminating Server");
         }
     }
 }
