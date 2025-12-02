@@ -1,0 +1,4 @@
+C:\Users\767490\source\repos\whois\whois\obj\Debug\net8.0\whois.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\767490\source\repos\whois\whois\obj\Debug\net8.0\whois.AssemblyInfoInputs.cache
+C:\Users\767490\source\repos\whois\whois\obj\Debug\net8.0\whois.AssemblyInfo.cs
+C:\Users\767490\source\repos\whois\whois\obj\Debug\net8.0\whois.csproj.CoreCompileInputs.cache
